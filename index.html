@@ -1,10 +1,10 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rich Text Comparison Tool</title>
-    <script src="script.js"></script>
     <style>
         * {
             margin: 0;
@@ -56,11 +56,14 @@
             grid-template-columns: 1fr 1fr;
             gap: 30px;
             margin-bottom: 30px;
+            
         }
 
         .input-group {
             display: flex;
             flex-direction: column;
+            overflow-y: scroll;
+            overflow-x: scroll;
         }
 
         .input-group label {
@@ -84,6 +87,8 @@
             transition: all 0.3s ease;
             background: white;
             box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.05);
+            min-width: 100%;
+            max-width: 100%;
         }
 
         .text-input:focus {
@@ -157,6 +162,24 @@
             grid-template-columns: 1fr 1fr;
             gap: 20px;
             margin-bottom: 20px;
+        }
+
+        /* Fix width and enable horizontal scroll for right panel */
+        .comparison-panel:last-child {
+            width: 500px;
+            min-width: 500px;
+            max-width: 500px;
+            overflow-x: auto;
+            display: block;
+        }
+        .comparison-panel:last-child .comparison-content {
+            width: 100%;
+            min-width: 500px;
+            max-width: 500px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            display: block;
         }
 
         .comparison-panel {
@@ -326,6 +349,8 @@
                         <button onclick="formatText('underline', 'text1')">U</button>
                         <button onclick="insertTable('text1')">Table</button>
                         <button onclick="clearFormatting('text1')">Clear</button>
+                        <input type="text" id="findTextInput" placeholder="Find text to delete..." style="margin-left:10px; padding:4px; font-size:12px; width:140px;">
+                        <button onclick="findAndDeleteInOriginal()" style="background:#e74c3c; color:white;">Delete All</button>
                     </div>
                     <div id="text1" class="text-input" contenteditable="true" placeholder="Paste or type your original text here. You can use Ctrl+V to paste rich content with formatting..."></div>
                 </div>
@@ -388,5 +413,485 @@
             </div>
         </div>
     </div>
+    <script>
+        // Find and delete all occurrences of a string in the original text (bulk delete)
+        function findAndDeleteInOriginal() {
+            const findValue = document.getElementById('findTextInput').value;
+            const text1Div = document.getElementById('text1');
+            if (!findValue) {
+                alert('Please enter text to find and delete.');
+                return;
+            }
+            // Normalize function: trims, collapses whitespace, decodes HTML entities
+            function normalize(str) {
+                const txt = document.createElement('textarea');
+                txt.innerHTML = str;
+                return txt.value.replace(/\s+/g, ' ').trim().toLowerCase();
+            }
+            // Build a flat string of all visible text, mapping each character to its text node and offset
+            const walker = document.createTreeWalker(text1Div, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            let fullText = '';
+            const nodeMap = []; // {node, start, end, localStart, localEnd}
+            let pos = 0;
+            while ((node = walker.nextNode())) {
+                const text = node.textContent;
+                if (text.length > 0) {
+                    nodeMap.push({ node, start: pos, end: pos + text.length, localStart: 0, localEnd: text.length });
+                    fullText += text;
+                    pos += text.length;
+                }
+            }
+            // Normalize both fullText and search string
+            const normFullText = normalize(fullText);
+            const normFind = normalize(findValue);
+            // Find all matches (global, overlapping)
+            let matchIndexes = [];
+            let idx = 0;
+            while ((idx = normFullText.indexOf(normFind, idx)) !== -1) {
+                matchIndexes.push(idx);
+                idx += normFind.length > 0 ? 1 : 0;
+                if (normFind.length === 0) break; // avoid infinite loop
+            }
+            if (matchIndexes.length === 0) {
+                // Fallback: if the normalized text contains the search string, but mapping failed, do a best-effort delete
+                if (normFullText.includes(normFind) && normFind.length > 0) {
+                    // Try to delete the first occurrence in the original text
+                    let firstIdx = fullText.toLowerCase().indexOf(findValue.toLowerCase());
+                    if (firstIdx !== -1) {
+                        // Find which node this is in
+                        let nIdx = nodeMap.findIndex(n => n.start <= firstIdx && n.end > firstIdx);
+                        if (nIdx !== -1) {
+                            let n = nodeMap[nIdx];
+                            let relStart = firstIdx - n.start;
+                            let relEnd = relStart + findValue.length;
+                            n.node.textContent = n.node.textContent.slice(0, relStart) + n.node.textContent.slice(relEnd);
+                            // Remove empty tags (td, th, tr, p, div, span)
+                            const tags = ['td', 'th', 'tr', 'p', 'div', 'span'];
+                            tags.forEach(tag => {
+                                const elements = text1Div.querySelectorAll(tag);
+                                elements.forEach(el => {
+                                    if (!el.textContent.trim() && el.childElementCount === 0) {
+                                        el.remove();
+                                    }
+                                });
+                            });
+                            return;
+                        }
+                    }
+                }
+                alert('No matches found to delete.');
+                return;
+            }
+            // For each match, remove the corresponding characters from the text nodes
+            // We need to map normalized positions back to original text positions
+            // To do this, walk both the original and normalized fullText in parallel
+            function buildNormMap(str) {
+                // Map: normPos -> origPos
+                let map = [];
+                let orig = 0, norm = 0;
+                while (orig < str.length) {
+                    if (/\s/.test(str[orig])) {
+                        // collapse whitespace to single space in normalized
+                        let ws = '';
+                        while (orig < str.length && /\s/.test(str[orig])) { ws += str[orig]; orig++; }
+                        map.push({ normPos: norm, origPos: orig - ws.length });
+                        norm++;
+                    } else {
+                        map.push({ normPos: norm, origPos: orig });
+                        orig++;
+                        norm++;
+                    }
+                }
+                return map;
+            }
+            const normMap = buildNormMap(fullText.toLowerCase());
+            // For each match, get the original start/end positions
+            let toDelete = [];
+            matchIndexes.forEach(normStart => {
+                // Find origStart and origEnd in normMap
+                let origStart = normMap.find(m => m.normPos === normStart)?.origPos;
+                let origEnd = normMap.find(m => m.normPos === normStart + normFind.length - 1)?.origPos;
+                if (origStart === undefined || origEnd === undefined) return;
+                toDelete.push({ origStart, origEnd: origEnd + 1 });
+            });
+            // Merge overlapping/adjacent ranges
+            toDelete.sort((a, b) => a.origStart - b.origStart);
+            let merged = [];
+            toDelete.forEach(r => {
+                if (!merged.length || merged[merged.length - 1].origEnd < r.origStart) {
+                    merged.push(r);
+                } else {
+                    merged[merged.length - 1].origEnd = Math.max(merged[merged.length - 1].origEnd, r.origEnd);
+                }
+            });
+            // Remove text in reverse order to not mess up positions
+            for (let i = merged.length - 1; i >= 0; i--) {
+                const { origStart, origEnd } = merged[i];
+                // Find which nodes this range covers
+                let startIdx = nodeMap.findIndex(n => n.start <= origStart && n.end > origStart);
+                let endIdx = nodeMap.findIndex(n => n.start < origEnd && n.end >= origEnd);
+                if (startIdx === -1 || endIdx === -1) continue;
+                if (startIdx === endIdx) {
+                    // All in one node
+                    let n = nodeMap[startIdx];
+                    let relStart = origStart - n.start;
+                    let relEnd = origEnd - n.start;
+                    n.node.textContent = n.node.textContent.slice(0, relStart) + n.node.textContent.slice(relEnd);
+                } else {
+                    // Spans multiple nodes
+                    // First node: remove from relStart to end
+                    let n1 = nodeMap[startIdx];
+                    let relStart = origStart - n1.start;
+                    n1.node.textContent = n1.node.textContent.slice(0, relStart);
+                    // Middle nodes: clear
+                    for (let j = startIdx + 1; j < endIdx; j++) {
+                        nodeMap[j].node.textContent = '';
+                    }
+                    // Last node: remove from 0 to relEnd
+                    let n2 = nodeMap[endIdx];
+                    let relEnd = origEnd - n2.start;
+                    n2.node.textContent = n2.node.textContent.slice(relEnd);
+                }
+            }
+            // Remove empty tags (td, th, tr, p, div, span)
+            const tags = ['td', 'th', 'tr', 'p', 'div', 'span'];
+            tags.forEach(tag => {
+                const elements = text1Div.querySelectorAll(tag);
+                elements.forEach(el => {
+                    if (!el.textContent.trim() && el.childElementCount === 0) {
+                        el.remove();
+                    }
+                });
+            });
+        }
+        // <script> tag removed for JS file context
+        let comparisonData = {
+            textChanges: 0,
+            formatChanges: 0,
+            totalChanges: 0,
+            formattingDifferences: []
+        };
+
+        function formatText(command, textId) {
+            const element = document.getElementById(textId);
+            element.focus();
+            document.execCommand(command, false, null);
+        }
+
+        function insertTable(textId) {
+            const element = document.getElementById(textId);
+            const tableHTML = `
+                <table border="1" style="border-collapse: collapse; margin: 10px 0;">
+                    <tr>
+                        <th style="padding: 8px; background: #f0f0f0;">Header 1</th>
+                        <th style="padding: 8px; background: #f0f0f0;">Header 2</th>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px;">Cell 1</td>
+                        <td style="padding: 8px;">Cell 2</td>
+                    </tr>
+                </table>
+            `;
+            element.focus();
+            document.execCommand('insertHTML', false, tableHTML);
+        }
+
+        function clearFormatting(textId) {
+            const element = document.getElementById(textId);
+            element.focus();
+            document.execCommand('removeFormat', false, null);
+        }
+
+        function clearAll() {
+            document.getElementById('text1').innerHTML = '';
+            document.getElementById('text2').innerHTML = '';
+            document.getElementById('results').style.display = 'none';
+            comparisonData = {
+                textChanges: 0,
+                formatChanges: 0,
+                totalChanges: 0,
+                formattingDifferences: []
+            };
+        }
+
+        function extractTextAndFormatting(element) {
+            const html = element.innerHTML;
+            const text = element.innerText;
+            
+            // Extract formatting information
+            const formatting = [];
+            const walker = document.createTreeWalker(
+                element,
+                NodeFilter.SHOW_ALL,
+                null,
+                false
+            );
+
+            let node;
+            let position = 0;
+            
+            while (node = walker.nextNode()) {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const parent = node.parentNode;
+                    const textContent = node.textContent;
+                    
+                    if (parent && parent !== element) {
+                        const styles = window.getComputedStyle(parent);
+                        const tagName = parent.tagName.toLowerCase();
+                        
+                        formatting.push({
+                            start: position,
+                            end: position + textContent.length,
+                            text: textContent,
+                            tag: tagName,
+                            bold: styles.fontWeight === 'bold' || styles.fontWeight >= 600 || tagName === 'b' || tagName === 'strong',
+                            italic: styles.fontStyle === 'italic' || tagName === 'i' || tagName === 'em',
+                            underline: styles.textDecoration.includes('underline') || tagName === 'u',
+                            color: styles.color,
+                            fontSize: styles.fontSize,
+                            fontFamily: styles.fontFamily
+                        });
+                    }
+                    
+                    position += textContent.length;
+                }
+            }
+
+            return {
+                text: text,
+                html: html,
+                formatting: formatting
+            };
+        }
+
+        // Helper to get formatting for a word at a given position
+        function getFormattingForWord(formatArr, word, pos) {
+            for (let i = 0; i < formatArr.length; i++) {
+                const f = formatArr[i];
+                if (f.start <= pos && pos < f.end && f.text.includes(word)) {
+                    return f;
+                }
+            }
+            return null;
+        }
+
+        function compareFormattingForUnchangedWords(words1, words2, format1, format2, textDiff) {
+            const differences = [];
+            let pos1 = 0, pos2 = 0;
+            let widx1 = 0, widx2 = 0;
+            textDiff.forEach(part => {
+                if (part.type === 'unchanged') {
+                    const word1 = words1[widx1] || '';
+                    const word2 = words2[widx2] || '';
+                    const f1 = getFormattingForWord(format1, word1, pos1);
+                    const f2 = getFormattingForWord(format2, word2, pos2);
+                    if (f1 && f2) {
+                        if (f1.bold !== f2.bold) {
+                            differences.push(`Bold formatting changed: ${f1.bold ? 'removed' : 'added'} at word '${word1}'`);
+                        }
+                        if (f1.italic !== f2.italic) {
+                            differences.push(`Italic formatting changed: ${f1.italic ? 'removed' : 'added'} at word '${word1}'`);
+                        }
+                        if (f1.underline !== f2.underline) {
+                            differences.push(`Underline formatting changed: ${f1.underline ? 'removed' : 'added'} at word '${word1}'`);
+                        }
+                    } else if ((f1 && !f2) || (!f1 && f2)) {
+                        if ((f1 && f1.bold) || (f2 && f2.bold)) {
+                            differences.push(`Bold formatting changed at word '${word1}'`);
+                        }
+                        if ((f1 && f1.italic) || (f2 && f2.italic)) {
+                            differences.push(`Italic formatting changed at word '${word1}'`);
+                        }
+                        if ((f1 && f1.underline) || (f2 && f2.underline)) {
+                            differences.push(`Underline formatting changed at word '${word1}'`);
+                        }
+                    }
+                    pos1 += word1.length + 1;
+                    pos2 += word2.length + 1;
+                    widx1++;
+                    widx2++;
+                } else if (part.type === 'removed') {
+                    const word1 = words1[widx1] || '';
+                    pos1 += word1.length + 1;
+                    widx1++;
+                } else if (part.type === 'added') {
+                    const word2 = words2[widx2] || '';
+                    pos2 += word2.length + 1;
+                    widx2++;
+                }
+            });
+            return differences;
+        }
+
+        function compareTexts() {
+            const text1Element = document.getElementById('text1');
+            const text2Element = document.getElementById('text2');
+            const data1 = extractTextAndFormatting(text1Element);
+            const data2 = extractTextAndFormatting(text2Element);
+            // Simple word-based comparison that actually works
+            const textDiff = simpleWordDiff(data1.text, data2.text);
+            // Compare formatting only for unchanged words
+            const words1 = data1.text.trim().split(/\s+/);
+            const words2 = data2.text.trim().split(/\s+/);
+            const formatDiff = compareFormattingForUnchangedWords(words1, words2, data1.formatting, data2.formatting, textDiff);
+            // Compare HTML for table and structure changes
+            const htmlDiff = data1.html !== data2.html;
+            // Display results
+            displayResults(data1, data2, textDiff, formatDiff, htmlDiff);
+        }
+
+        function simpleWordDiff(text1, text2) {
+            // Split into words
+            const words1 = text1.trim().split(/\s+/);
+            const words2 = text2.trim().split(/\s+/);
+            
+            // Create a simple diff by comparing word by word
+            const diff = [];
+            const maxLength = Math.max(words1.length, words2.length);
+            
+            for (let i = 0; i < maxLength; i++) {
+                const word1 = words1[i] || '';
+                const word2 = words2[i] || '';
+                
+                if (word1 === word2) {
+                    if (word1) diff.push({ type: 'unchanged', value: word1 });
+                } else {
+                    if (word1) diff.push({ type: 'removed', value: word1 });
+                    if (word2) diff.push({ type: 'added', value: word2 });
+                }
+            }
+            
+            return diff;
+        }
+
+        function displayResults(data1, data2, textDiff, formatDiff, htmlDiff) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.style.display = 'block';
+            
+            // Count changes
+            const textChanges = textDiff.filter(d => d.type !== 'unchanged').length;
+            const formatChanges = formatDiff.length;
+            const totalChanges = textChanges + formatChanges + (htmlDiff ? 1 : 0);
+            
+            // Calculate similarity
+            const totalWords = Math.max(data1.text.split(/\s+/).filter(w => w.length > 0).length, 
+                                      data2.text.split(/\s+/).filter(w => w.length > 0).length);
+            const unchangedWords = textDiff.filter(d => d.type === 'unchanged').length;
+            const similarity = totalWords > 0 ? Math.round((unchangedWords / totalWords) * 100) : 100;
+            
+            // Update stats
+            document.getElementById('totalChanges').textContent = totalChanges;
+            document.getElementById('textChanges').textContent = textChanges;
+            document.getElementById('formatChanges').textContent = formatChanges;
+            document.getElementById('similarity').textContent = similarity + '%';
+            
+
+            // Helper to check formatting for a word at a given position
+            function getFormattingForWord(formatArr, word, pos) {
+                // Find formatting that covers this word's position
+                for (let i = 0; i < formatArr.length; i++) {
+                    const f = formatArr[i];
+                    if (f.start <= pos && pos < f.end && f.text.includes(word)) {
+                        return f;
+                    }
+                }
+                return null;
+            }
+
+            // Build highlighted HTML for original and modified text, including formatting changes
+            let originalHTML = '';
+            let modifiedHTML = '';
+            let pos1 = 0, pos2 = 0;
+            let widx1 = 0, widx2 = 0;
+            const words1 = data1.text.trim().split(/\s+/);
+            const words2 = data2.text.trim().split(/\s+/);
+
+            textDiff.forEach(part => {
+                if (part.type === 'unchanged') {
+                    // Check for formatting differences
+                    const word1 = words1[widx1] || '';
+                    const word2 = words2[widx2] || '';
+                    const f1 = getFormattingForWord(data1.formatting, word1, pos1);
+                    const f2 = getFormattingForWord(data2.formatting, word2, pos2);
+                    let hasFormatDiff = false;
+                    if (f1 && f2) {
+                        if (f1.bold !== f2.bold || f1.italic !== f2.italic || f1.underline !== f2.underline) {
+                            hasFormatDiff = true;
+                        }
+                    } else if ((f1 && !f2) || (!f1 && f2)) {
+                        hasFormatDiff = true;
+                    }
+                    if (hasFormatDiff) {
+                        // Highlight as modified in both panels
+                        originalHTML += `<span class="diff-modified">${word1}</span> `;
+                        modifiedHTML += `<span class="diff-modified">${word2}</span> `;
+                    } else {
+                        originalHTML += `${word1} `;
+                        modifiedHTML += `${word2} `;
+                    }
+                    pos1 += word1.length + 1;
+                    pos2 += word2.length + 1;
+                    widx1++;
+                    widx2++;
+                } else if (part.type === 'removed') {
+                    const word1 = words1[widx1] || '';
+                    originalHTML += `<span class="diff-removed">${word1}</span> `;
+                    pos1 += word1.length + 1;
+                    widx1++;
+                } else if (part.type === 'added') {
+                    const word2 = words2[widx2] || '';
+                    modifiedHTML += `<span class="diff-added">${word2}</span> `;
+                    pos2 += word2.length + 1;
+                    widx2++;
+                }
+            });
+
+            // Display results
+            const originalResult = document.getElementById('originalResult');
+            const modifiedResult = document.getElementById('modifiedResult');
+            originalResult.innerHTML = originalHTML.trim();
+            modifiedResult.innerHTML = modifiedHTML.trim();
+            
+            // Display formatting changes
+            const formattingList = document.getElementById('formattingList');
+            formattingList.innerHTML = '';
+            
+            if (formatDiff.length > 0) {
+                formatDiff.forEach(change => {
+                    const changeDiv = document.createElement('div');
+                    changeDiv.className = 'formatting-change';
+                    changeDiv.textContent = change;
+                    formattingList.appendChild(changeDiv);
+                });
+            } else if (htmlDiff) {
+                const changeDiv = document.createElement('div');
+                changeDiv.className = 'formatting-change';
+                changeDiv.textContent = 'HTML structure or table formatting has changed';
+                formattingList.appendChild(changeDiv);
+            } else {
+                formattingList.innerHTML = '<div style="color: #28a745; text-align: center;">No formatting changes detected</div>';
+            }
+            
+            // Show no differences message if texts are identical
+            if (totalChanges === 0) {
+                resultsDiv.innerHTML = `
+                    <h2>Comparison Results</h2>
+                    <div class="no-differences">
+                        ✅ No differences found! The texts are identical.
+                    </div>
+                `;
+            }
+        }
+
+        // Enable paste with formatting
+        document.getElementById('text1').addEventListener('paste', function(e) {
+            // Allow default paste behavior to preserve formatting
+        });
+
+        document.getElementById('text2').addEventListener('paste', function(e) {
+            // Allow default paste behavior to preserve formatting
+        });
+    </script>
 </body>
 </html>
