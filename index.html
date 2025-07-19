@@ -629,46 +629,43 @@
         function extractTextAndFormatting(element) {
             const html = element.innerHTML;
             const text = element.innerText;
-            
-            // Extract formatting information
+            // Extract formatting information by word, using tag structure only (not computed style)
             const formatting = [];
-            const walker = document.createTreeWalker(
-                element,
-                NodeFilter.SHOW_ALL,
-                null,
-                false
-            );
-
-            let node;
             let position = 0;
-            
-            while (node = walker.nextNode()) {
+            // Split text into words, track their DOM node and parent tags
+            function walkWords(node, parentTags) {
                 if (node.nodeType === Node.TEXT_NODE) {
-                    const parent = node.parentNode;
-                    const textContent = node.textContent;
-                    
-                    if (parent && parent !== element) {
-                        const styles = window.getComputedStyle(parent);
-                        const tagName = parent.tagName.toLowerCase();
-                        
+                    // Split text node into words, track offset
+                    const words = node.textContent.split(/(\s+)/);
+                    let offset = 0;
+                    for (let w of words) {
+                        if (w.trim() === '') {
+                            position += w.length;
+                            offset += w.length;
+                            continue;
+                        }
+                        // Check if any parent tag is b/strong/i/em/u
+                        const tags = parentTags.map(t => t.tagName ? t.tagName.toLowerCase() : '').filter(Boolean);
                         formatting.push({
                             start: position,
-                            end: position + textContent.length,
-                            text: textContent,
-                            tag: tagName,
-                            bold: styles.fontWeight === 'bold' || styles.fontWeight >= 600 || tagName === 'b' || tagName === 'strong',
-                            italic: styles.fontStyle === 'italic' || tagName === 'i' || tagName === 'em',
-                            underline: styles.textDecoration.includes('underline') || tagName === 'u',
-                            color: styles.color,
-                            fontSize: styles.fontSize,
-                            fontFamily: styles.fontFamily
+                            end: position + w.length,
+                            word: w,
+                            bold: tags.includes('b') || tags.includes('strong'),
+                            italic: tags.includes('i') || tags.includes('em'),
+                            underline: tags.includes('u')
                         });
+                        position += w.length;
+                        offset += w.length;
                     }
-                    
-                    position += textContent.length;
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                    let newTags = parentTags.slice();
+                    newTags.push(node);
+                    for (let child of node.childNodes) {
+                        walkWords(child, newTags);
+                    }
                 }
             }
-
+            walkWords(element, []);
             return {
                 text: text,
                 html: html,
@@ -678,9 +675,10 @@
 
         // Helper to get formatting for a word at a given position
         function getFormattingForWord(formatArr, word, pos) {
+            // Find formatting for the exact word at this position
             for (let i = 0; i < formatArr.length; i++) {
                 const f = formatArr[i];
-                if (f.start <= pos && pos < f.end && f.text.includes(word)) {
+                if (f.start === pos && f.word === word) {
                     return f;
                 }
             }
@@ -693,10 +691,13 @@
             let widx1 = 0, widx2 = 0;
             textDiff.forEach(part => {
                 if (part.type === 'unchanged') {
-                    const word1 = words1[widx1] || '';
-                    const word2 = words2[widx2] || '';
-                    const f1 = getFormattingForWord(format1, word1, pos1);
-                    const f2 = getFormattingForWord(format2, word2, pos2);
+                    let word1 = words1[widx1] || '';
+                    let word2 = words2[widx2] || '';
+                    // Strip trailing punctuation for formatting comparison
+                    let baseWord1 = word1.replace(/[.,!?;:]+$/, '');
+                    let baseWord2 = word2.replace(/[.,!?;:]+$/, '');
+                    const f1 = getFormattingForWord(format1, baseWord1, pos1);
+                    const f2 = getFormattingForWord(format2, baseWord2, pos2);
                     if (f1 && f2) {
                         if (f1.bold !== f2.bold) {
                             differences.push(`Bold formatting changed: ${f1.bold ? 'removed' : 'added'} at word '${word1}'`);
@@ -800,10 +801,10 @@
 
             // Helper to check formatting for a word at a given position
             function getFormattingForWord(formatArr, word, pos) {
-                // Find formatting that covers this word's position
+                // Use the same logic as the main getFormattingForWord: match by start and word
                 for (let i = 0; i < formatArr.length; i++) {
                     const f = formatArr[i];
-                    if (f.start <= pos && pos < f.end && f.text.includes(word)) {
+                    if (f.start === pos && f.word === word) {
                         return f;
                     }
                 }
@@ -815,48 +816,75 @@
             let modifiedHTML = '';
             let pos1 = 0, pos2 = 0;
             let widx1 = 0, widx2 = 0;
-            const words1 = data1.text.trim().split(/\s+/);
-            const words2 = data2.text.trim().split(/\s+/);
+            // Use split, but if text is blank, get empty array
+            const words1 = data1.text.trim().length > 0 ? data1.text.trim().split(/\s+/) : [];
+            const words2 = data2.text.trim().length > 0 ? data2.text.trim().split(/\s+/) : [];
 
-            textDiff.forEach(part => {
-                if (part.type === 'unchanged') {
-                    // Check for formatting differences
-                    const word1 = words1[widx1] || '';
-                    const word2 = words2[widx2] || '';
-                    const f1 = getFormattingForWord(data1.formatting, word1, pos1);
-                    const f2 = getFormattingForWord(data2.formatting, word2, pos2);
-                    let hasFormatDiff = false;
-                    if (f1 && f2) {
-                        if (f1.bold !== f2.bold || f1.italic !== f2.italic || f1.underline !== f2.underline) {
+            // If both are blank, show nothing
+            if (words1.length === 0 && words2.length === 0) {
+                originalHTML = '';
+                modifiedHTML = '';
+            } else if (words1.length === 0) {
+                // Original is blank, show all added in modified
+                for (let word2 of words2) {
+                    if (word2.trim() !== '') {
+                        modifiedHTML += `<span class="diff-added">${word2}</span> `;
+                    }
+                }
+                originalHTML = '';
+            } else if (words2.length === 0) {
+                // Modified is blank, show all removed in original
+                for (let word1 of words1) {
+                    if (word1.trim() !== '') {
+                        originalHTML += `<span class="diff-removed">${word1}</span> `;
+                    }
+                }
+                modifiedHTML = '';
+            } else {
+                textDiff.forEach(part => {
+                    if (part.type === 'unchanged') {
+                        // Check for formatting differences
+                        const word1 = words1[widx1] || '';
+                        const word2 = words2[widx2] || '';
+                        const f1 = getFormattingForWord(data1.formatting, word1, pos1);
+                        const f2 = getFormattingForWord(data2.formatting, word2, pos2);
+                        let hasFormatDiff = false;
+                        if (f1 && f2) {
+                            if (f1.bold !== f2.bold || f1.italic !== f2.italic || f1.underline !== f2.underline) {
+                                hasFormatDiff = true;
+                            }
+                        } else if ((f1 && !f2) || (!f1 && f2)) {
                             hasFormatDiff = true;
                         }
-                    } else if ((f1 && !f2) || (!f1 && f2)) {
-                        hasFormatDiff = true;
+                        if (hasFormatDiff) {
+                            // Highlight as modified in both panels
+                            originalHTML += `<span class="diff-modified">${word1}</span> `;
+                            modifiedHTML += `<span class="diff-modified">${word2}</span> `;
+                        } else {
+                            originalHTML += `${word1} `;
+                            modifiedHTML += `${word2} `;
+                        }
+                        pos1 += word1.length + 1;
+                        pos2 += word2.length + 1;
+                        widx1++;
+                        widx2++;
+                    } else if (part.type === 'removed') {
+                        const word1 = words1[widx1] || '';
+                        if (word1.trim() !== '') {
+                            originalHTML += `<span class="diff-removed">${word1}</span> `;
+                        }
+                        pos1 += word1.length + 1;
+                        widx1++;
+                    } else if (part.type === 'added') {
+                        const word2 = words2[widx2] || '';
+                        if (word2.trim() !== '') {
+                            modifiedHTML += `<span class="diff-added">${word2}</span> `;
+                        }
+                        pos2 += word2.length + 1;
+                        widx2++;
                     }
-                    if (hasFormatDiff) {
-                        // Highlight as modified in both panels
-                        originalHTML += `<span class="diff-modified">${word1}</span> `;
-                        modifiedHTML += `<span class="diff-modified">${word2}</span> `;
-                    } else {
-                        originalHTML += `${word1} `;
-                        modifiedHTML += `${word2} `;
-                    }
-                    pos1 += word1.length + 1;
-                    pos2 += word2.length + 1;
-                    widx1++;
-                    widx2++;
-                } else if (part.type === 'removed') {
-                    const word1 = words1[widx1] || '';
-                    originalHTML += `<span class="diff-removed">${word1}</span> `;
-                    pos1 += word1.length + 1;
-                    widx1++;
-                } else if (part.type === 'added') {
-                    const word2 = words2[widx2] || '';
-                    modifiedHTML += `<span class="diff-added">${word2}</span> `;
-                    pos2 += word2.length + 1;
-                    widx2++;
-                }
-            });
+                });
+            }
 
             // Display results
             const originalResult = document.getElementById('originalResult');
@@ -896,13 +924,47 @@
         }
 
         // Enable paste with formatting
-        document.getElementById('text1').addEventListener('paste', function(e) {
-            // Allow default paste behavior to preserve formatting
-        });
+        // Force plain text paste and preserve font family for both fields
+        function handlePasteAsPlainTextAndFont(e) {
+            // Allow default paste (preserve formatting)
+            setTimeout(() => {
+                e.target.style.fontFamily = "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
+                // Remove font-family from all descendants (but keep other styles/tags)
+                if (e.target.querySelectorAll) {
+                    e.target.querySelectorAll('*').forEach(child => {
+                        child.style.fontFamily = '';
+                        child.removeAttribute('face');
+                    });
+                }
+            }, 0);
+        }
+        // Input fields: always plain text and enforce font
+        document.getElementById('text1').addEventListener('paste', handlePasteAsPlainTextAndFont);
+        document.getElementById('text2').addEventListener('paste', handlePasteAsPlainTextAndFont);
 
-        document.getElementById('text2').addEventListener('paste', function(e) {
-            // Allow default paste behavior to preserve formatting
-        });
+        // Output fields: forcibly set font family and strip font styles if any HTML is inserted
+        function enforceOutputFontFamily(elementId) {
+            const el = document.getElementById(elementId);
+            if (!el) return;
+            // Observe changes to innerHTML and remove font-family styles
+            const observer = new MutationObserver(function(mutations) {
+                mutations.forEach(function(mutation) {
+                    if (mutation.type === 'childList' || mutation.type === 'subtree') {
+                        // Remove font-family from all descendants
+                        el.querySelectorAll('*').forEach(child => {
+                            child.style.fontFamily = '';
+                            child.removeAttribute('face');
+                        });
+                        el.style.fontFamily = "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
+                    }
+                });
+            });
+            observer.observe(el, { childList: true, subtree: true });
+            // Initial set
+            el.style.fontFamily = "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
+        }
+        enforceOutputFontFamily('originalResult');
+        enforceOutputFontFamily('modifiedResult');
     </script>
 </body>
 </html>
