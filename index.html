@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -426,7 +425,14 @@
             function normalize(str) {
                 const txt = document.createElement('textarea');
                 txt.innerHTML = str;
-                return txt.value.replace(/\s+/g, ' ').trim().toLowerCase();
+                let value = txt.value;
+                // Remove zero-width, non-breaking, and other invisible unicode spaces
+                value = value.replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+                // Replace multiple whitespace (including tabs, newlines) with a single space
+                value = value.replace(/\s+/g, ' ');
+                // Optionally, remove spaces before/after punctuation (uncomment if needed)
+                // value = value.replace(/\s*([.,!?;:])\s*/g, '$1 ');
+                return value.trim().toLowerCase();
             }
             // Build a flat string of all visible text, mapping each character to its text node and offset
             const walker = document.createTreeWalker(text1Div, NodeFilter.SHOW_TEXT, null, false);
